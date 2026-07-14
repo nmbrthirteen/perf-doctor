@@ -1,6 +1,6 @@
 {
   "name": "perf-doctor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Find why your pages load slow, then fix it.",
   "repository": {
     "type": "git",
