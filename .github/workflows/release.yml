@@ -14,10 +14,9 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
       - run: npm ci
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access public
       - run: gh release create ${{ github.ref_name }} --generate-notes
         env:
           GH_TOKEN: ${{ github.token }}
