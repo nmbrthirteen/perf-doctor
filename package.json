@@ -1,0 +1,47 @@
+{
+  "name": "perf-doctor",
+  "version": "0.1.0",
+  "description": "Find why your pages load slow, then fix it.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nmbrthirteen/perf-doctor.git"
+  },
+  "homepage": "https://github.com/nmbrthirteen/perf-doctor#readme",
+  "bugs": "https://github.com/nmbrthirteen/perf-doctor/issues",
+  "type": "module",
+  "bin": {
+    "perf-doctor": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "skill",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "playwright-core": "^1.49.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^7.0.2"
+  },
+  "keywords": [
+    "performance",
+    "core-web-vitals",
+    "lcp",
+    "cls",
+    "nextjs",
+    "claude",
+    "agent",
+    "skill"
+  ],
+  "license": "MIT"
+}

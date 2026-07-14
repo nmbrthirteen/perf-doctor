@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">perf-doctor icon</title>
+  <desc id="desc">A minimal adaptive performance gauge.</desc>
+  <defs>
+    <linearGradient id="accent" x1="152" y1="350" x2="376" y2="126" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#20e3b2"/>
+      <stop offset="1" stop-color="#61dafb"/>
+    </linearGradient>
+    <style>
+      .ink { stroke: #0b0f14; }
+      .fill { fill: #0b0f14; }
+      .muted { stroke: #d8dee8; }
+      @media (prefers-color-scheme: dark) {
+        .ink { stroke: #f8fafc; }
+        .fill { fill: #f8fafc; }
+        .muted { stroke: #273241; }
+      }
+    </style>
+  </defs>
+  <path class="ink" d="M140 318a126 126 0 0 1 232-96" fill="none" stroke-width="34" stroke-linecap="round"/>
+  <path class="muted" d="M180 318a86 86 0 0 1 158-66" fill="none" stroke-width="22" stroke-linecap="round"/>
+  <path d="M256 318 356 184" fill="none" stroke="url(#accent)" stroke-width="34" stroke-linecap="round"/>
+  <circle class="fill" cx="256" cy="318" r="29"/>
+  <circle cx="256" cy="318" r="13" fill="#20e3b2"/>
+</svg>
