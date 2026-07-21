@@ -81,6 +81,13 @@ function aggregate(raw: ProbeResult, cdpSizes: Map<string, number>, origin: stri
   return { bytesBeforeLcp, bytesByType, thirdPartyBytes };
 }
 
+function headerValue(headers: Record<string, string>, name: string): string | null {
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === name) return headers[key] ?? null;
+  }
+  return null;
+}
+
 async function fetchHtml(url: string, userAgent: string | null): Promise<string> {
   try {
     const res = await fetch(url, {
@@ -119,9 +126,16 @@ async function measureOnce(
 
   const cdpSizes = new Map<string, number>();
   const urlByRequest = new Map<string, string>();
-  client.on("Network.responseReceived", (e: { requestId: string; response: { url: string } }) => {
-    urlByRequest.set(e.requestId, e.response.url);
-  });
+  const cacheByUrl: Record<string, string | null> = {};
+  client.on(
+    "Network.responseReceived",
+    (e: { requestId: string; response: { url: string; headers: Record<string, string> } }) => {
+      urlByRequest.set(e.requestId, e.response.url);
+      if (!(e.response.url in cacheByUrl)) {
+        cacheByUrl[e.response.url] = headerValue(e.response.headers, "cache-control");
+      }
+    },
+  );
   client.on("Network.loadingFinished", (e: { requestId: string; encodedDataLength: number }) => {
     const u = urlByRequest.get(e.requestId);
     if (u) cdpSizes.set(u, (cdpSizes.get(u) || 0) + e.encodedDataLength);
@@ -166,6 +180,7 @@ async function measureOnce(
       ...aggregate(raw, cdpSizes, origin),
       lcpResource,
       phases: computePhases(raw, lcpResource),
+      cacheByUrl,
       error: null,
       html: "",
     };
@@ -179,6 +194,7 @@ async function measureOnce(
       bytesBeforeLcp: 0,
       bytesByType: {},
       thirdPartyBytes: {},
+      cacheByUrl: {},
       html: "",
     };
   } finally {

@@ -98,7 +98,15 @@ export interface Measurement extends ProbeResult {
   bytesBeforeLcp: number;
   bytesByType: Record<string, number>;
   thirdPartyBytes: Record<string, number>;
+  cacheByUrl: Record<string, string | null>;
   html: string;
+}
+
+export interface NetworkAsset {
+  url: string;
+  type: string;
+  cacheControl: string | null;
+  bytes: number;
 }
 
 export type Severity = "high" | "medium" | "low";

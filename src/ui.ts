@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { verdict, type Baseline } from "./report.js";
 import { scoreBand, siteScore } from "./score.js";
-import type { ReportMeta, RouteResult } from "./types.js";
+import type { Finding, ReportMeta, RouteResult } from "./types.js";
 
 export const C = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -155,6 +155,7 @@ export function printScore(results: RouteResult[]): void {
   const filled = Math.round(s / 5);
   const bar = col("█".repeat(filled)) + C.dim("░".repeat(20 - filled));
   console.log(`\n${C.bold("Score")}  ${bar}  ${col(`${s}/100`)} ${col(band)}`);
+  console.log(C.dim("        throttled lab estimate, not Google's field score"));
 }
 
 function codeFrame(file: string, line: number): string | null {
@@ -200,9 +201,9 @@ export async function pickAgent(options: string[]): Promise<number | null> {
   });
 }
 
-export function printFindings(results: RouteResult[], meta: ReportMeta): void {
+export function printFindings(results: RouteResult[], meta: ReportMeta, extra: Finding[] = []): void {
   const w = Math.max(...results.map((r) => r.route.length), 6);
-  const all = results.flatMap((r) => r.findings);
+  const all = [...results.flatMap((r) => r.findings), ...extra];
   const high = all.filter((f) => f.severity === "high");
   const med = all.filter((f) => f.severity === "medium").length;
 

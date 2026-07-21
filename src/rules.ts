@@ -1,4 +1,11 @@
-import type { Finding, RuleContext, Severity, SourceIndex } from "./types.js";
+import type {
+  Finding,
+  NetworkAsset,
+  ResourceInfo,
+  RuleContext,
+  Severity,
+  SourceIndex,
+} from "./types.js";
 
 const VENDORS: [string, string][] = [
   ["termly", "Termly consent banner"],
@@ -17,6 +24,12 @@ const VENDORS: [string, string][] = [
 
 const kb = (bytes: number) => `${Math.round(bytes / 1024)}KB`;
 const pct = (n: number) => `${Math.round(n * 100)}%`;
+
+function shortName(url: string): string {
+  const path = url.split("?")[0] ?? url;
+  const leaf = path.split("/").pop();
+  return leaf ? leaf : url;
+}
 
 function underlyingSrc(url: string | null): string | null {
   if (!url) return null;
@@ -224,6 +237,49 @@ const RULES: Rule[] = [
     },
   },
   {
+    id: "lcp-render-blocking",
+    run(ctx) {
+      const total = ctx.phases?.total ?? ctx.lcp?.time ?? 0;
+      if (!total) return null;
+      const blocking = ctx.m.resources.filter(
+        (r) => r.renderBlocking === "blocking" && r.responseEnd > 0 && r.responseEnd <= total,
+      );
+      if (!blocking.length) return null;
+      const ttfb = ctx.m.ttfb || 0;
+      const finishesAt = Math.max(...blocking.map((r) => r.responseEnd));
+      const blockingWindow = Math.max(0, finishesAt - ttfb);
+      const sized = (r: ResourceInfo) => r.transferSize || r.encodedSize || 0;
+      const bytes = blocking.reduce((a, r) => a + sized(r), 0);
+      // Ignore the common, cheap case: a small stylesheet that resolves right after TTFB.
+      if (blockingWindow < 500 && bytes < 60 * 1024) return null;
+      const allCss = blocking.every(
+        (r) => r.type === "link" || r.type === "css" || /\.css(\?|$)/i.test(r.name),
+      );
+      const noun = allCss ? "stylesheet" : "resource";
+      const biggest = blocking
+        .slice()
+        .sort((a, b) => sized(b) - sized(a))
+        .slice(0, 3)
+        .map((r) => {
+          const s = sized(r);
+          return s ? `${shortName(r.name)} ${kb(s)}` : shortName(r.name);
+        })
+        .join(", ");
+      return {
+        severity: blockingWindow > 1500 || bytes > 150 * 1024 ? "high" : "medium",
+        title: allCss
+          ? "Render-blocking CSS delays the first paint"
+          : "Render-blocking resources delay the first paint",
+        evidence: `${blocking.length} render-blocking ${noun}${blocking.length > 1 ? "s" : ""}${
+          bytes ? ` (${kb(bytes)})` : ""
+        } ${blocking.length > 1 ? "finish" : "finishes"} at ${finishesAt}ms, ${blockingWindow}ms after the server responded, and nothing paints until they do.${
+          biggest ? ` Largest: ${biggest}.` : ""
+        }`,
+        fix: "Inline the critical CSS and load the rest without blocking (a media swap, or preload then apply on load). Split oversized global CSS so each route ships only the rules it renders, and load web fonts through next/font so their stylesheet doesn't gate the paint.",
+      };
+    },
+  },
+  {
     id: "lcp-ttfb-slow",
     run(ctx) {
       if (!ctx.m.ttfb || ctx.m.ttfb < 800) return null;
@@ -319,6 +375,71 @@ const SOURCE_RULES: SourceRule[] = [
   },
 ];
 
+const STATIC_ASSET = /\.(js|mjs|css|woff2?|ttf|otf|eot|png|jpe?g|gif|webp|avif|svg|ico|mp4|webm|m4v)(\?|$)/i;
+
+function isStaticAsset(url: string): boolean {
+  return STATIC_ASSET.test(url) || /\/_next\/(static|image)\//.test(url);
+}
+
+interface CachePolicy {
+  maxAge: number | null;
+  immutable: boolean;
+  noStore: boolean;
+}
+
+function parseCacheControl(value: string | null): CachePolicy {
+  if (!value) return { maxAge: null, immutable: false, noStore: false };
+  const v = value.toLowerCase();
+  const maxAge = v.match(/(?:^|[,\s])max-age=(\d+)/) ?? v.match(/(?:^|[,\s])s-maxage=(\d+)/);
+  return {
+    maxAge: maxAge ? Number(maxAge[1]) : null,
+    immutable: /\bimmutable\b/.test(v),
+    noStore: /\bno-store\b/.test(v),
+  };
+}
+
+// A day is the line between "worth re-fetching" and "should have stuck around".
+function weaklyCached(policy: CachePolicy): boolean {
+  if (policy.immutable) return false;
+  if (policy.noStore) return true;
+  if (policy.maxAge == null) return true;
+  return policy.maxAge < 86400;
+}
+
+function assetCacheRule(assets: NetworkAsset[], origin: string): Finding | null {
+  const weak = assets.filter((a) => {
+    if (!isStaticAsset(a.url)) return false;
+    try {
+      if (new URL(a.url).origin !== origin) return false;
+    } catch {
+      return false;
+    }
+    return weaklyCached(parseCacheControl(a.cacheControl));
+  });
+  if (!weak.length) return null;
+
+  const bytes = weak.reduce((n, a) => n + a.bytes, 0);
+  const examples = weak
+    .slice()
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 4)
+    .map((a) => {
+      const cc = a.cacheControl ? `\`${a.cacheControl}\`` : "no cache-control header";
+      return a.bytes ? `${shortName(a.url)} (${kb(a.bytes)}, ${cc})` : `${shortName(a.url)} (${cc})`;
+    })
+    .join("; ");
+
+  return {
+    rule: "assets-weak-cache",
+    severity: bytes > 300 * 1024 || weak.length > 8 ? "high" : "medium",
+    title: `${weak.length} static asset${weak.length > 1 ? "s" : ""} lack a durable cache`,
+    evidence: `${weak.length} first-party static asset${weak.length > 1 ? "s are" : " is"} served without a durable cache${
+      bytes ? ` (${kb(bytes)} in total)` : ""
+    }, so returning visitors download them again. ${examples}.`,
+    fix: "Cache static assets for a year. When the filename is content-hashed so its URL changes with the file (Next.js /_next/static already is), send `Cache-Control: public, max-age=31536000, immutable`. For an asset at a stable URL that can still change, use a shorter max-age with revalidation, or add a version to the name so it can be cached immutably.",
+  };
+}
+
 const ORDER: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
 const bySeverity = (a: Finding, b: Finding) => ORDER[a.severity] - ORDER[b.severity];
 
@@ -353,5 +474,12 @@ export function runSourceRules(index: SourceIndex): Finding[] {
     }
     if (f) findings.push({ ...f, rule: rule.id });
   }
+  return findings.sort(bySeverity);
+}
+
+export function runNetworkRules(assets: NetworkAsset[], origin: string): Finding[] {
+  const findings: Finding[] = [];
+  const cache = assetCacheRule(assets, origin);
+  if (cache) findings.push(cache);
   return findings.sort(bySeverity);
 }

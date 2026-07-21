@@ -8,7 +8,7 @@ import { detectProject, discoverRoutes, findBase, loadConfig } from "./detect.js
 import { PROFILES, dominantPhase, looksLikeDevServer, measure } from "./measure.js";
 import { install, uninstall } from "./install.js";
 import { toMarkdown, type Baseline } from "./report.js";
-import { runRules, runSourceRules } from "./rules.js";
+import { runNetworkRules, runRules, runSourceRules } from "./rules.js";
 import { attribute, buildIndex } from "./scan.js";
 import { Renderer, pickAgent, printDelta, printFindings, printFooter, printScore } from "./ui.js";
 import type { DiscoveredRoute, ReportMeta, RouteResult } from "./types.js";
@@ -225,6 +225,7 @@ async function main(): Promise<void> {
   const sweep = async (opts: { offerAgent: boolean; compareTo?: string }): Promise<boolean> => {
     const browser = await launch();
     const slots: (RouteResult | null)[] = routes.map(() => null);
+    const assetCache = new Map<string, { type: string; cacheControl: string | null; bytes: number }>();
     let devServer = false;
     let cursor = 0;
     const ui = jsonMode
@@ -245,6 +246,15 @@ async function main(): Promise<void> {
           onRun: (run, total) => ui?.progress(i, run, total),
         });
         if (m.html && looksLikeDevServer(m.html)) devServer = true;
+
+        for (const r of m.resources) {
+          if (!(r.name in m.cacheByUrl) || assetCache.has(r.name)) continue;
+          assetCache.set(r.name, {
+            type: r.type,
+            cacheControl: m.cacheByUrl[r.name] ?? null,
+            bytes: r.transferSize || r.encodedSize || 0,
+          });
+        }
 
         const element = m.lcp?.element ?? null;
         const attribution = index && element ? attribute(index, element, file) : null;
@@ -293,6 +303,10 @@ async function main(): Promise<void> {
 
     const results = slots.filter((r): r is RouteResult => r !== null);
     const sourceFindings = index ? runSourceRules(index) : [];
+    const networkFindings = runNetworkRules(
+      [...assetCache].map(([url, a]) => ({ url, ...a })),
+      new URL(base).origin,
+    );
     const meta: ReportMeta = {
       base,
       profileName,
@@ -301,13 +315,14 @@ async function main(): Promise<void> {
       at: new Date().toISOString(),
       devServer,
     };
-    const hasFindings = results.some((r) => r.findings.length) || sourceFindings.length > 0;
+    const hasFindings =
+      results.some((r) => r.findings.length) || sourceFindings.length > 0 || networkFindings.length > 0;
 
     if (jsonMode) {
-      console.log(JSON.stringify({ meta, results, sourceFindings }, null, 2));
+      console.log(JSON.stringify({ meta, results, sourceFindings, networkFindings }, null, 2));
     } else {
       printScore(results);
-      printFindings(results, meta);
+      printFindings(results, meta, [...sourceFindings, ...networkFindings]);
       const deltaSource = opts.compareTo && existsSync(opts.compareTo) ? opts.compareTo : blPath;
       if (existsSync(deltaSource)) {
         try {
@@ -316,8 +331,11 @@ async function main(): Promise<void> {
       }
     }
 
-    writeFileSync(join(outDir, "report.md"), toMarkdown(results, meta, sourceFindings));
-    writeFileSync(join(outDir, "report.json"), JSON.stringify({ meta, results, sourceFindings }, null, 2));
+    writeFileSync(join(outDir, "report.md"), toMarkdown(results, meta, sourceFindings, networkFindings));
+    writeFileSync(
+      join(outDir, "report.json"),
+      JSON.stringify({ meta, results, sourceFindings, networkFindings }, null, 2),
+    );
     if (parallel === 1) {
       const baseline: Baseline = {
         meta: { base, profileName, at: meta.at },
