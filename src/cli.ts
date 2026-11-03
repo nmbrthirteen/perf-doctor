@@ -3,21 +3,23 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs, parseCount, stringFlag } from "./args.js";
 import { launch } from "./browser.js";
 import { detectProject, discoverRoutes, findBase, loadConfig } from "./detect.js";
-import { PROFILES, dominantPhase, looksLikeDevServer, measure } from "./measure.js";
+import { dominantPhase, looksLikeDevServer, measure, profileByName } from "./measure.js";
 import { install, uninstall } from "./install.js";
 import { toMarkdown, type Baseline } from "./report.js";
 import { runNetworkRules, runRules, runSourceRules } from "./rules.js";
 import { attribute, buildIndex } from "./scan.js";
-import { Renderer, pickAgent, printDelta, printFindings, printFooter, printScore } from "./ui.js";
+import { Renderer, pickAgent, printDelta, printFindings, printFooter, printScore, printWarnings } from "./ui.js";
 import type { DiscoveredRoute, ReportMeta, RouteResult } from "./types.js";
 
 const HELP = `
-perf-doctor  measure every route, find the cause, verify the fix
+perf-doctor  measure your routes, find the cause, verify the fix
 
 Usage
-  npx perf-doctor                          all routes of the app in this folder
+  npx perf-doctor                          all routes found in this folder (Next.js)
+                                           other frameworks: up to 25 routes from /sitemap.xml
   npx perf-doctor /stories                 one route
   npx perf-doctor https://site.com/page    one page anywhere
   npx perf-doctor install                  add the agent skill and AGENTS.md section
@@ -31,7 +33,7 @@ Words you can add, no flags needed
 
 Examples
   npx perf-doctor /stories 3
-  npx perf-doctor https://lifeat.upgaming.com fast
+  npx perf-doctor https://example.com fast
   npx perf-doctor desktop fix
 
 Flags, same things for scripts
@@ -39,46 +41,38 @@ Flags, same things for scripts
   --limit=<n> --agent=<cmd> --fix --json --help
 `;
 
-interface Args {
-  _: string[];
-  [key: string]: string | boolean | string[];
-}
+const SITEMAP_CAP = 25;
+const DEFAULT_PORTS = [3000, 3001, 4000, 5173, 4321];
 
-function parseArgs(argv: string[]): Args {
-  const args: Args = { _: [] };
-  for (const a of argv) {
-    if (!a.startsWith("--")) {
-      args._.push(a);
-      continue;
-    }
-    const [k, v] = a.replace(/^--/, "").split("=");
-    if (k) args[k] = v ?? true;
-  }
-  return args;
-}
-
-async function sitemapRoutes(base: string): Promise<DiscoveredRoute[]> {
+async function sitemapRoutes(base: string): Promise<{ routes: DiscoveredRoute[]; total: number }> {
   try {
     const res = await fetch(new URL("/sitemap.xml", base), { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) return [];
+
+    if (!res.ok) return { routes: [], total: 0 };
     const xml = await res.text();
-    const paths = [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)]
-      .map((m) => {
-        try {
-          return new URL(m[1]!).pathname;
-        } catch {
-          return null;
-        }
-      })
-      .filter((p): p is string => p != null);
-    return [...new Set(paths)].slice(0, 25).map((route) => ({ route, file: null }));
+
+    const paths = [...xml.matchAll(/<loc>([^<]+)<\/loc>/g)].flatMap((m) => {
+      try {
+        return [new URL(m[1]!).pathname];
+      } catch {
+        return [];
+      }
+    });
+
+    const unique = [...new Set(paths)];
+
+    return {
+      routes: unique.slice(0, SITEMAP_CAP).map((route) => ({ route, file: null })),
+      total: unique.length,
+    };
   } catch {
-    return [];
+    return { routes: [], total: 0 };
   }
 }
 
 function baselinePath(outDir: string, base: string, profileName: string): string {
   const slug = `${base}-${profileName}`.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "");
+
   return join(outDir, `baseline-${slug}.json`);
 }
 
@@ -91,6 +85,7 @@ const KNOWN_AGENTS: [string, string][] = [
 
 function commandExists(bin: string): boolean {
   const probe = process.platform === "win32" ? "where" : "which";
+
   return spawnSync(probe, [bin], { stdio: "ignore" }).status === 0;
 }
 
@@ -98,10 +93,13 @@ function runAgent(agent: string, prompt: string): boolean {
   console.log(`Handing the report to ${agent} ...\n`);
   const parts = agent.split(" ");
   const res = spawnSync(parts[0]!, [...parts.slice(1), prompt], { stdio: "inherit" });
+
   if (res.error) {
     console.error(`Could not start ${agent}: ${res.error.message}`);
+
     return false;
   }
+
   return true;
 }
 
@@ -112,28 +110,38 @@ function copyToClipboard(text: string): void {
       : process.platform === "win32"
         ? ["clip"]
         : ["xclip", "-selection", "clipboard"];
+
   const res = spawnSync(cmd[0]!, cmd.slice(1), { input: text });
+
   if (res.error || res.status !== 0) {
     console.log(`Could not reach the clipboard, here is the prompt:\n\n${text}`);
+
     return;
   }
+
   console.log("Prompt copied. Paste it into any agent.");
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+
   if (args["help"]) {
     console.log(HELP);
+
     return;
   }
 
   const cwd = process.cwd();
+
   if (args._[0] === "install") {
     install(cwd);
+
     return;
   }
+
   if (args._[0] === "uninstall") {
     uninstall(cwd);
+
     return;
   }
 
@@ -146,10 +154,12 @@ async function main(): Promise<void> {
   let posParallel: number | null = null;
   let fixMode = Boolean(args["fix"]);
   const posRoutes: string[] = [];
+
   for (const p of args._) {
     if (/^https?:\/\//.test(p)) {
       const u = new URL(p);
       posBase ??= u.origin;
+
       if (u.pathname !== "/" || u.search) posRoutes.push(u.pathname + u.search);
     } else if (p.startsWith("/")) {
       posRoutes.push(p);
@@ -168,32 +178,36 @@ async function main(): Promise<void> {
   }
 
   const profileName = String(args["profile"] || posProfile || config.profile || "mobile");
-  const profile = PROFILES[profileName];
+  const profile = profileByName(profileName);
+
   if (!profile) throw new Error(`Unknown profile: ${profileName}. Use mobile or desktop.`);
 
   const base =
-    (typeof args["base"] === "string" && args["base"]) ||
+    stringFlag(args, "base") ||
     posBase ||
     config.base ||
-    (await findBase(["http://localhost:3000", "http://localhost:3001", "http://localhost:4000"]));
+    (await findBase(DEFAULT_PORTS.map((p) => `http://localhost:${p}`)));
 
   if (!base) {
     console.error(
-      "No server found on localhost:3000, 3001, or 4000. Start your app, or pass --base=<url>.\nMeasure a production build (next build && next start), a dev server gives numbers nobody ships.",
+      `No server found on localhost:${DEFAULT_PORTS.join(", ")}. Start your app, or pass --base=<url>.\nMeasure a production build (next build && next start), a dev server gives numbers nobody ships.`,
     );
     process.exit(1);
   }
 
+  const routesFlag = stringFlag(args, "routes");
   let routes: DiscoveredRoute[] = [];
+
   if (posRoutes.length) {
     routes = posRoutes.map((route) => ({ route, file: null }));
-  } else if (typeof args["routes"] === "string") {
-    routes = args["routes"].split(",").map((route) => ({ route, file: null }));
+  } else if (routesFlag !== undefined) {
+    routes = routesFlag.split(",").map((route) => ({ route, file: null }));
   } else if (config.routes) {
     routes = config.routes.map((route) => ({ route, file: null }));
   } else {
     const discovered = discoverRoutes(cwd, project, config.params ?? {});
     routes = discovered.routes;
+
     if (discovered.skipped.length) {
       console.log(
         `\nSkipping ${discovered.skipped.length} dynamic route(s): ${discovered.skipped
@@ -202,18 +216,31 @@ async function main(): Promise<void> {
       );
     }
   }
-  if (!routes.length) routes = await sitemapRoutes(base);
+
+  if (!routes.length) {
+    const sitemap = await sitemapRoutes(base);
+    routes = sitemap.routes;
+
+    if (sitemap.total > SITEMAP_CAP) {
+      console.log(
+        `\nSitemap lists ${sitemap.total} routes. Measuring the first ${SITEMAP_CAP}. Pass --routes=/a,/b to choose others.`,
+      );
+    }
+  }
+
   if (!routes.length) {
     console.error("No routes found. Pass --routes=/,/about or add a routes array to perf-doctor.json.");
     process.exit(1);
   }
-  if (args["limit"]) routes = routes.slice(0, Number(args["limit"]));
 
-  const runs = Number(args["runs"] || posRuns || config.runs || 1);
-  const parallel = Math.max(1, Number(args["parallel"] || posParallel || config.parallel || 1));
+  if (args["limit"] !== undefined) routes = routes.slice(0, parseCount("limit", args["limit"], routes.length));
+
+  const runs = parseCount("runs", args["runs"] ?? posRuns ?? config.runs, 1);
+  const parallel = parseCount("parallel", args["parallel"] ?? posParallel ?? config.parallel, 1);
   const jsonMode = Boolean(args["json"]);
   const index = project.framework === "unknown" ? null : buildIndex(cwd);
 
+  // SAFETY: the package.json shipped beside dist always carries a string version.
   const version = JSON.parse(
     readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
   ).version as string;
@@ -228,6 +255,7 @@ async function main(): Promise<void> {
     const assetCache = new Map<string, { type: string; cacheControl: string | null; bytes: number }>();
     let devServer = false;
     let cursor = 0;
+
     const ui = jsonMode
       ? null
       : new Renderer(
@@ -241,10 +269,12 @@ async function main(): Promise<void> {
         const { route, file } = routes[i]!;
         const url = new URL(route, base).toString();
         ui?.start(i, runs);
+
         const m = await measure(browser, url, profile, {
           runs,
           onRun: (run, total) => ui?.progress(i, run, total),
         });
+
         if (m.html && looksLikeDevServer(m.html)) devServer = true;
 
         for (const r of m.resources) {
@@ -260,7 +290,8 @@ async function main(): Promise<void> {
         const attribution = index && element ? attribute(index, element, file) : null;
         const phases = m.phases;
         const dominant = dominantPhase(phases);
-        const findings = runRules({
+
+        const ruled = runRules({
           route,
           m,
           lcp: m.lcp,
@@ -288,7 +319,8 @@ async function main(): Promise<void> {
           attribution: attribution
             ? { file: attribution.file, line: attribution.line, how: attribution.how }
             : null,
-          findings,
+          findings: ruled.findings,
+          warnings: [...m.warnings, ...ruled.failures],
         };
         ui?.done(i, slots[i]!);
       }
@@ -302,11 +334,14 @@ async function main(): Promise<void> {
     }
 
     const results = slots.filter((r): r is RouteResult => r !== null);
-    const sourceFindings = index ? runSourceRules(index) : [];
+    const sourceRuled = index ? runSourceRules(index) : { findings: [], failures: [] };
+    const sourceFindings = sourceRuled.findings;
+
     const networkFindings = runNetworkRules(
       [...assetCache].map(([url, a]) => ({ url, ...a })),
       new URL(base).origin,
     );
+
     const meta: ReportMeta = {
       base,
       profileName,
@@ -315,41 +350,53 @@ async function main(): Promise<void> {
       at: new Date().toISOString(),
       devServer,
     };
+
     const hasFindings =
       results.some((r) => r.findings.length) || sourceFindings.length > 0 || networkFindings.length > 0;
 
     if (jsonMode) {
-      console.log(JSON.stringify({ meta, results, sourceFindings, networkFindings }, null, 2));
+      console.log(JSON.stringify({ meta, results, sourceFindings, networkFindings, sourceWarnings: sourceRuled.failures }, null, 2));
     } else {
       printScore(results);
       printFindings(results, meta, [...sourceFindings, ...networkFindings]);
+      printWarnings(results, sourceRuled.failures);
       const deltaSource = opts.compareTo && existsSync(opts.compareTo) ? opts.compareTo : blPath;
+
       if (existsSync(deltaSource)) {
         try {
-          printDelta(results, JSON.parse(readFileSync(deltaSource, "utf8")) as Baseline);
-        } catch {}
+          // SAFETY: baselines are written by this tool; a stale or hand-edited file throws inside printDelta and is reported below.
+          printDelta(results, JSON.parse(readFileSync(deltaSource, "utf8")) as Baseline, { runs, parallel });
+        } catch (err) {
+          console.log(
+            `\nCould not compare with the saved baseline (${err instanceof Error ? err.message : String(err)}). Delete ${deltaSource} to start fresh.`,
+          );
+        }
       }
     }
 
-    writeFileSync(join(outDir, "report.md"), toMarkdown(results, meta, sourceFindings, networkFindings));
+    writeFileSync(
+      join(outDir, "report.md"),
+      toMarkdown(results, meta, sourceFindings, networkFindings, sourceRuled.failures),
+    );
     writeFileSync(
       join(outDir, "report.json"),
-      JSON.stringify({ meta, results, sourceFindings, networkFindings }, null, 2),
+      JSON.stringify({ meta, results, sourceFindings, networkFindings, sourceWarnings: sourceRuled.failures }, null, 2),
     );
-    if (parallel === 1) {
-      const baseline: Baseline = {
-        meta: { base, profileName, at: meta.at },
-        results: results.map(({ route, lcp, cls, tbt }) => ({
-          route,
-          lcp: lcp ? { time: lcp.time } : null,
-          cls,
-          tbt,
-        })),
-      };
-      writeFileSync(blPath, JSON.stringify(baseline, null, 2));
-    }
+
+    const baseline: Baseline = {
+      meta: { base, profileName, at: meta.at, runs, parallel },
+      results: results.map(({ route, lcp, cls, tbt }) => ({
+        route,
+        lcp: lcp ? { time: lcp.time } : null,
+        cls,
+        tbt,
+      })),
+    };
+
+    writeFileSync(blPath, JSON.stringify(baseline, null, 2));
 
     if (!jsonMode) printFooter(opts.offerAgent && hasFindings);
+
     return hasFindings;
   };
 
@@ -360,9 +407,11 @@ async function main(): Promise<void> {
     .slice(2)
     .filter((a) => a !== "--fix" && a !== "fix" && !a.startsWith("--agent"))
     .join(" ");
+
   const prompt = `Read .perf/report.md. Fix the high severity findings one at a time, worst route first. After each fix, verify it: re-run "npx perf-doctor ${rerun}" and confirm the route's LCP delta improved before moving on. Never make a visual change without asking first.`;
 
   const beforeFix = join(outDir, "before-fix.json");
+
   const verify = async () => {
     console.log(`\n${"-".repeat(40)}\nAgent session ended. Verifying the result ...\n`);
     await sweep({ offerAgent: false, compareTo: beforeFix });
@@ -372,27 +421,38 @@ async function main(): Promise<void> {
   if (fixMode) {
     if (!hasFindings) {
       console.log("Nothing to fix, skipping the agent handoff.");
+
       return;
     }
+
     if (existsSync(blPath)) copyFileSync(blPath, beforeFix);
-    const started = runAgent(typeof args["agent"] === "string" ? args["agent"] : "claude", prompt);
+    const started = runAgent(stringFlag(args, "agent") ?? "claude", prompt);
+
     if (started) await verify();
+
     return;
   }
 
   if (canPick && hasFindings) {
     const available = KNOWN_AGENTS.filter(([, bin]) => commandExists(bin));
+
     const options = available.length
       ? [...available.map(([label]) => label), "Skip"]
       : ["Copy prompt", "Skip"];
+
     const choice = await pickAgent(options);
+
     if (choice == null || choice === options.length - 1) return;
+
     if (!available.length) {
       copyToClipboard(prompt);
+
       return;
     }
+
     if (existsSync(blPath)) copyFileSync(blPath, beforeFix);
     const started = runAgent(available[choice]![1], prompt);
+
     if (started) await verify();
   }
 }

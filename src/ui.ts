@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { underlyingSrc } from "./rules.js";
 import { verdict, type Baseline } from "./report.js";
 import { scoreBand, siteScore } from "./score.js";
 import type { Finding, ReportMeta, RouteResult } from "./types.js";
@@ -26,16 +27,21 @@ function safeDecode(s: string): string {
 
 function elementLabel(r: RouteResult, max: number): string {
   if (r.error) return C.red(`error: ${r.error.slice(0, max)}`);
+
   if (!r.lcp) return C.dim("no LCP");
   const el = r.lcp.element;
+
   if (!el) return C.dim("unknown element");
   const name = el.tag + (el.cls ? `.${el.cls.trim().split(/\s+/)[0]}` : "");
+
   const detail = el.src
-    ? safeDecode(el.src).split("/").pop()!.split("?")[0]!
+    ? safeDecode(underlyingSrc(el.src) ?? el.src).split("?")[0]!.split("/").pop()!
     : el.text
       ? `"${el.text}"`
       : "";
+
   const room = Math.max(0, max - name.length - 1);
+
   return `${name} ${C.dim(detail.slice(0, room))}`;
 }
 
@@ -75,12 +81,14 @@ export class Renderer {
     console.log(
       `  ${"".padEnd(this.w)}  ${C.dim("LCP".padStart(7))}  ${C.dim("CLS".padStart(5))}  ${C.dim("TBT".padStart(6))}`,
     );
+
     if (this.tty) {
       for (const r of routes) console.log(this.pendingLine(r));
       console.log("");
       console.log(this.counterLine());
       this.timer = setInterval(() => this.tick(), 120);
-      if (typeof this.timer.unref === "function") this.timer.unref();
+
+      this.timer.unref();
     }
   }
 
@@ -90,9 +98,11 @@ export class Renderer {
 
   private counterLine(): string {
     const scanned = C.dim(`Measuring routes (${this.measured}/${this.routes.length})`);
+
     if (!this.high && !this.medium) return scanned;
     const high = this.high ? C.red(`${this.high} high`) : C.dim("0 high");
     const med = this.medium ? C.yellow(`${this.medium} medium`) : C.dim("0 medium");
+
     return `${scanned}   findings › ${high} · ${med}`;
   }
 
@@ -110,6 +120,7 @@ export class Renderer {
   private tick(): void {
     if (!this.active.size) return;
     this.frame = (this.frame + 1) % SPINNER.length;
+
     for (const [i, note] of this.active) {
       this.redraw(i, `${C.cyan(SPINNER[this.frame]!)} ${this.routes[i]!.padEnd(this.w)}  ${C.dim(note)}`);
     }
@@ -135,9 +146,11 @@ export class Renderer {
     const tbt = r.tbt != null ? `${r.tbt}ms` : "-";
     const icon = r.error ? C.red("✗") : color(verdict("lcp", r.lcp?.time))("✓");
     const fixed = 2 + this.w + 2 + 7 + 2 + 5 + 2 + 6 + 2;
+
     const line = `${icon} ${r.route.padEnd(this.w)}  ${color(verdict("lcp", r.lcp?.time))(lcp.padStart(7))}  ${color(
       verdict("cls", r.cls),
     )(cls.padStart(5))}  ${color(verdict("tbt", r.tbt))(tbt.padStart(6))}  ${elementLabel(r, this.cols - fixed)}`;
+
     if (this.tty) this.redraw(i, line);
     else console.log(line);
   }
@@ -149,6 +162,7 @@ export class Renderer {
 
 export function printScore(results: RouteResult[]): void {
   const s = siteScore(results);
+
   if (s == null) return;
   const band = scoreBand(s);
   const col = band === "good" ? C.green : band === "needs work" ? C.yellow : C.red;
@@ -161,7 +175,9 @@ export function printScore(results: RouteResult[]): void {
 function codeFrame(file: string, line: number): string | null {
   try {
     const text = readFileSync(file, "utf8").split("\n")[line - 1];
+
     if (!text?.trim()) return null;
+
     return `      ${C.dim(`${line} |`)} ${C.dim(text.trim().slice(0, 90))}`;
   } catch {
     return null;
@@ -171,17 +187,22 @@ function codeFrame(file: string, line: number): string | null {
 export async function pickAgent(options: string[]): Promise<number | null> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) return null;
   console.log(`${C.bold("Hand these findings to an agent?")}\n`);
+
   return new Promise((resolve) => {
     let sel = 0;
+
     const render = (first = false) => {
       if (!first) process.stdout.write(`\x1b[${options.length}A`);
+
       for (const [i, o] of options.entries()) {
         process.stdout.write(`\r\x1b[2K${i === sel ? C.bold(`› ${o}`) : C.dim(`  ${o}`)}\n`);
       }
     };
+
     render(true);
     process.stdin.setRawMode(true);
     process.stdin.resume();
+
     const finish = (v: number | null) => {
       process.stdin.off("data", onData);
       process.stdin.setRawMode(false);
@@ -189,14 +210,17 @@ export async function pickAgent(options: string[]): Promise<number | null> {
       console.log("");
       resolve(v);
     };
+
     const onData = (b: Buffer) => {
       const s = b.toString();
+
       if (s === "\x1b[A" || s === "k") sel = (sel + options.length - 1) % options.length;
       else if (s === "\x1b[B" || s === "j") sel = (sel + 1) % options.length;
       else if (s === "\r" || s === "\n") return finish(sel);
       else if (s === "\x03" || s === "\x1b" || s === "q") return finish(null);
       render();
     };
+
     process.stdin.on("data", onData);
   });
 }
@@ -210,15 +234,21 @@ export function printFindings(results: RouteResult[], meta: ReportMeta, extra: F
   console.log(
     `\n${C.bold("Findings")}  ${high.length ? C.red(`${high.length} high`) : C.dim("0 high")} · ${med ? C.yellow(`${med} medium`) : C.dim("0 medium")}`,
   );
+
   for (const f of high.slice(0, 6)) {
     console.log(
-      `  ${C.red("!")} ${(f.route ?? "").padEnd(w)}  ${f.title}${f.file ? C.dim(`  ${f.file}:${f.line}`) : ""}`,
+      `  ${C.red("!")} ${(f.route ?? "").padEnd(w)}  ${f.title}${
+        f.file ? C.dim(`  ${f.file}:${f.line} (best guess${f.foundBy ? `, matched by ${f.foundBy}` : ""})`) : ""
+      }`,
     );
+
     if (f.file && f.line) {
       const frame = codeFrame(f.file, f.line);
+
       if (frame) console.log(frame);
     }
   }
+
   if (high.length > 6) console.log(C.dim(`  and ${high.length - 6} more in the report`));
 
   if (meta.devServer) {
@@ -228,28 +258,63 @@ export function printFindings(results: RouteResult[], meta: ReportMeta, extra: F
   }
 }
 
-export function printDelta(results: RouteResult[], baseline: Baseline): void {
+export function printWarnings(results: RouteResult[], sourceFailures: string[]): void {
+  const lines = [
+    ...results.flatMap((r) => r.warnings.map((w) => `${r.route}: ${w}`)),
+    ...sourceFailures,
+  ];
+
+  if (!lines.length) return;
+  console.log(`\n${C.yellow("Warnings")}  some checks failed, so missing numbers are gaps, not good results`);
+
+  for (const l of lines.slice(0, 8)) console.log(C.dim(`  ${l}`));
+
+  if (lines.length > 8) console.log(C.dim(`  and ${lines.length - 8} more in .perf/report.md`));
+}
+
+export function printDelta(
+  results: RouteResult[],
+  baseline: Baseline,
+  current: { runs: number; parallel: number },
+): void {
+  const saved = { runs: baseline.meta.runs, parallel: baseline.meta.parallel ?? 1 };
+
+  if (saved.parallel !== current.parallel || (saved.runs != null && saved.runs !== current.runs)) {
+    console.log(
+      C.dim(
+        `\nSkipping the change since last run: the saved baseline used ${saved.parallel} at a time and ${saved.runs ?? "?"} run(s), this run used ${current.parallel} and ${current.runs}. Re-run with the same settings to compare.`,
+      ),
+    );
+
+    return;
+  }
+
   const prev = new Map(baseline.results.map((r) => [r.route, r]));
   const rows = results.filter((r) => r.lcp && prev.get(r.route)?.lcp);
+
   if (!rows.length) return;
 
   console.log(`\n${C.bold("Change since last run")} ${C.dim(`(${baseline.meta.at})`)}`);
   const w = Math.max(...rows.map((r) => r.route.length), 6);
   let moved = 0;
+
   for (const r of rows) {
     const before = prev.get(r.route)!.lcp!.time;
     const after = r.lcp!.time;
     const d = after - before;
+
     if (Math.abs(d) < 150) continue;
     moved++;
     const sign = d < 0 ? C.green(`${d}ms`) : C.red(`+${d}ms`);
     console.log(`  ${r.route.padEnd(w)}  ${before}ms -> ${after}ms  ${sign}`);
   }
+
   if (!moved) console.log(C.dim("  no route moved by more than 150ms"));
 }
 
 export function printFooter(interactive: boolean): void {
   console.log(`\n${C.bold("Report")}  .perf/report.md`);
+
   if (!interactive) console.log(C.dim(`Hand it to your agent: claude "work through .perf/report.md"`));
   console.log("");
 }

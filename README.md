@@ -10,7 +10,7 @@
 npx perf-doctor@latest
 ```
 
-It measures every route of your app on a throttled connection, shows which element won LCP and why it was late, points at the file, and scores the site 0-100. At the end, pick your coding agent: it fixes the findings and perf-doctor re-measures, so you see the before and after.
+It measures your app's routes on a throttled connection, shows which element won LCP and why it was late, points at a best-guess file, and scores the site 0-100. Next.js routes are walked from the app or pages folder. Other frameworks use up to 25 routes from `/sitemap.xml`, or the routes you pass. File pointers come from matching text, class names, and image names in your source, so confirm each one before editing. At the end, pick your coding agent: it fixes the findings and perf-doctor re-measures, so you see the before and after.
 
 ```
 ✓ /        6032ms   0.00   939ms  img cover_88b2f2d54a.jpg
@@ -19,7 +19,7 @@ It measures every route of your app on a throttled connection, shows which eleme
 Score  ████████░░░░░░░░░░░░  41/100 poor
 
 Findings  3 high · 2 medium
-  ! /about  LCP image is marked loading="lazy"  components/BounceCards.tsx:145
+  ! /about  LCP image is marked loading="lazy"  components/BounceCards.tsx:145 (best guess, matched by image filename)
 
 Hand these findings to an agent?
   › Claude Code
@@ -35,6 +35,6 @@ npx perf-doctor fix                     # measure, fix, re-measure, no questions
 npx perf-doctor install                 # teach your agent the loop (uninstall undoes it)
 ```
 
-Needs Node 18+ and a Chrome installed, nothing else. The full report lands in `.perf/report.md`. Run `--help` for flags.
+Needs Node 18+ and a Chrome installed, nothing else. Without `--base`, it probes localhost ports 3000, 3001, 4000, 5173, and 4321. The full report lands in `.perf/report.md`. Run `--help` for flags.
 
 MIT

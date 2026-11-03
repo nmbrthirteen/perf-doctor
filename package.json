@@ -24,13 +24,17 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "lint": "oxlint .",
+    "test": "tsc -p tsconfig.test.json && node --test \".test-build/test/*.test.js\"",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "playwright-core": "^1.49.0"
   },
   "devDependencies": {
+    "@oxlint/plugins": "1.78.0",
     "@types/node": "^24.13.3",
+    "oxlint": "1.78.0",
     "typescript": "^7.0.2"
   },
   "keywords": [
