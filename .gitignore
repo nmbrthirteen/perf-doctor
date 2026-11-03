@@ -3,3 +3,4 @@ dist/
 .perf/
 .npm-cache
 .DS_Store
+.test-build/

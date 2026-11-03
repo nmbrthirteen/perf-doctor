@@ -28,14 +28,17 @@ const pct = (n: number) => `${Math.round(n * 100)}%`;
 function shortName(url: string): string {
   const path = url.split("?")[0] ?? url;
   const leaf = path.split("/").pop();
+
   return leaf ? leaf : url;
 }
 
-function underlyingSrc(url: string | null): string | null {
+export function underlyingSrc(url: string | null): string | null {
   if (!url) return null;
+
   try {
     const u = new URL(url, "http://x");
     const inner = u.searchParams.get("url");
+
     return inner ? decodeURIComponent(inner) : url;
   } catch {
     return url;
@@ -44,26 +47,33 @@ function underlyingSrc(url: string | null): string | null {
 
 function srcFingerprint(url: string | null): string | null {
   const real = underlyingSrc(url);
+
   if (!real) return null;
   const name = real.split("?")[0]!.split("/").pop();
+
   return name && name.length > 6 ? name : real.slice(-40);
 }
 
 function hasToken(haystack: string, token: string): boolean {
   const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
   return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`).test(haystack);
 }
 
 function vendorOf(ctx: RuleContext): string | null {
   const el = ctx.element;
+
   if (!el) return null;
+
   const haystack = [el.cls, el.id, el.src, ...(el.ancestors || [])]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+
   for (const [token, label] of VENDORS) {
     if (hasToken(haystack, token)) return label;
   }
+
   return null;
 }
 
@@ -79,15 +89,19 @@ function decodeEntities(s: string): string {
 
 function htmlHasText(html: string, text: string): boolean {
   const collapse = (s: string) => decodeEntities(s).replace(/\s+/g, " ").trim();
+
   return collapse(html).includes(collapse(text));
 }
 
 function htmlHasSrc(html: string, fingerprint: string): boolean {
   if (html.includes(fingerprint)) return true;
+
   if (html.includes(encodeURIComponent(fingerprint))) return true;
+
   try {
     if (html.includes(decodeURIComponent(fingerprint))) return true;
   } catch {}
+
   return false;
 }
 
@@ -98,7 +112,9 @@ const RULES: Rule[] = [
     id: "lcp-third-party-element",
     run(ctx) {
       const vendor = vendorOf(ctx);
+
       if (!vendor || !ctx.lcp) return null;
+
       return {
         severity: "high",
         title: `${vendor} is the LCP element`,
@@ -112,10 +128,14 @@ const RULES: Rule[] = [
     run(ctx) {
       if (!ctx.lcp || !ctx.html || vendorOf(ctx)) return null;
       const el = ctx.element;
+
       if (!el) return null;
+
       if (el.src) {
         const fp = srcFingerprint(el.src);
+
         if (!fp || htmlHasSrc(ctx.html, fp)) return null;
+
         return {
           severity: "high",
           title: "LCP image was not found in the server HTML",
@@ -123,8 +143,10 @@ const RULES: Rule[] = [
           fix: "Render it during SSR. If a client hook fetches its data, seed it with server data (react-query initialData, or props).",
         };
       }
+
       if (el.text && el.text.length >= 12) {
         if (htmlHasText(ctx.html, el.text.slice(0, 40))) return null;
+
         return {
           severity: "medium",
           title: "LCP text was not found in the server HTML",
@@ -132,6 +154,7 @@ const RULES: Rule[] = [
           fix: "Render this text during SSR so it paints from the first response.",
         };
       }
+
       return null;
     },
   },
@@ -139,10 +162,13 @@ const RULES: Rule[] = [
     id: "lcp-image-deprioritized",
     run(ctx) {
       const el = ctx.element;
+
       if (!el || el.tag !== "img" || !ctx.phases) return null;
       const low = el.fetchPriority === "low";
       const lazy = el.loading === "lazy";
+
       if (!low && !lazy) return null;
+
       return {
         severity: "high",
         title: `LCP image is marked ${low ? 'fetchpriority="low"' : 'loading="lazy"'}`,
@@ -157,15 +183,22 @@ const RULES: Rule[] = [
     id: "lcp-image-not-preloaded",
     run(ctx) {
       const el = ctx.element;
+
       if (!el || !ctx.lcp?.url || !ctx.phases) return null;
+
       if (ctx.phases.loadDelay < 400) return null;
+
       if (el.fetchPriority === "low" || el.loading === "lazy") return null;
       const fp = srcFingerprint(ctx.lcp.url);
+
       if (!fp) return null;
+
       const preloaded = ctx.m.preloads.some(
         (p) => p.rel === "preload" && (p.href.includes(fp) || (p.imagesrcset ?? "").includes(fp)),
       );
+
       if (preloaded) return null;
+
       return {
         severity: "high",
         title: "LCP image is not preloaded",
@@ -178,13 +211,17 @@ const RULES: Rule[] = [
     id: "lcp-image-oversized",
     run(ctx) {
       const el = ctx.element;
+
       if (!el || el.tag !== "img" || !el.naturalWidth || !el.displayWidth || !ctx.phases) return null;
       const dpr = ctx.profile.deviceScaleFactor || 1;
       const target = el.displayWidth * dpr;
+
       if (!target) return null;
       const ratio = el.naturalWidth / target;
+
       if (ratio < 1.6) return null;
       const bytes = ctx.m.lcpResource?.transferSize || 0;
+
       return {
         severity: bytes > 150 * 1024 ? "high" : "medium",
         title: `LCP image is ${ratio.toFixed(1)}x larger than it renders`,
@@ -199,11 +236,15 @@ const RULES: Rule[] = [
     id: "lcp-render-delay-dominant",
     run(ctx) {
       const p = ctx.phases;
+
       if (!p || p.kind !== "image") return null;
+
       if (p.renderDelay < 1000 || p.renderDelay / p.total < 0.35) return null;
+
       const gated = ctx.attribution?.source
         ? /opacity-0|opacity:\s*0|initial=\{\{[^}]*opacity/.test(ctx.attribution.source)
         : false;
+
       return {
         severity: "high",
         title: "LCP image downloads early, then paints late",
@@ -216,7 +257,9 @@ const RULES: Rule[] = [
     id: "lcp-js-starvation",
     run(ctx) {
       const scriptBytes = ctx.m.bytesByType["script"] || 0;
+
       if (scriptBytes < 300 * 1024) return null;
+
       const third = Object.entries(ctx.m.thirdPartyBytes)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 3)
@@ -228,6 +271,7 @@ const RULES: Rule[] = [
           }
         })
         .join(", ");
+
       return {
         severity: scriptBytes > 700 * 1024 ? "high" : "medium",
         title: `${kb(scriptBytes)} of JavaScript downloads before LCP`,
@@ -240,31 +284,40 @@ const RULES: Rule[] = [
     id: "lcp-render-blocking",
     run(ctx) {
       const total = ctx.phases?.total ?? ctx.lcp?.time ?? 0;
+
       if (!total) return null;
+
       const blocking = ctx.m.resources.filter(
         (r) => r.renderBlocking === "blocking" && r.responseEnd > 0 && r.responseEnd <= total,
       );
+
       if (!blocking.length) return null;
       const ttfb = ctx.m.ttfb || 0;
       const finishesAt = Math.max(...blocking.map((r) => r.responseEnd));
       const blockingWindow = Math.max(0, finishesAt - ttfb);
       const sized = (r: ResourceInfo) => r.transferSize || r.encodedSize || 0;
       const bytes = blocking.reduce((a, r) => a + sized(r), 0);
+
       // Ignore the common, cheap case: a small stylesheet that resolves right after TTFB.
       if (blockingWindow < 500 && bytes < 60 * 1024) return null;
+
       const allCss = blocking.every(
         (r) => r.type === "link" || r.type === "css" || /\.css(\?|$)/i.test(r.name),
       );
+
       const noun = allCss ? "stylesheet" : "resource";
+
       const biggest = blocking
         .slice()
         .sort((a, b) => sized(b) - sized(a))
         .slice(0, 3)
         .map((r) => {
           const s = sized(r);
+
           return s ? `${shortName(r.name)} ${kb(s)}` : shortName(r.name);
         })
         .join(", ");
+
       return {
         severity: blockingWindow > 1500 || bytes > 150 * 1024 ? "high" : "medium",
         title: allCss
@@ -283,6 +336,7 @@ const RULES: Rule[] = [
     id: "lcp-ttfb-slow",
     run(ctx) {
       if (!ctx.m.ttfb || ctx.m.ttfb < 800) return null;
+
       return {
         severity: ctx.m.ttfb > 1800 ? "high" : "medium",
         title: `Server takes ${ctx.m.ttfb}ms to first byte`,
@@ -295,9 +349,12 @@ const RULES: Rule[] = [
     id: "lcp-image-heavy",
     run(ctx) {
       const p = ctx.phases;
+
       if (!p || p.kind !== "image" || p.loadTime < 1500) return null;
+
       if (p.loadTime / p.total < 0.3) return null;
       const bytes = ctx.m.lcpResource?.transferSize || 0;
+
       return {
         severity: "medium",
         title: `LCP image takes ${p.loadTime}ms to download`,
@@ -311,6 +368,7 @@ const RULES: Rule[] = [
     run(ctx) {
       if (ctx.m.cls == null || ctx.m.cls <= 0.1) return null;
       const s = ctx.m.worstShift?.sources?.[0];
+
       return {
         severity: ctx.m.cls > 0.25 ? "high" : "medium",
         title: `Layout shifts by ${ctx.m.cls}`,
@@ -325,6 +383,7 @@ const RULES: Rule[] = [
     id: "blocking-time-high",
     run(ctx) {
       if (!ctx.m.tbt || ctx.m.tbt < 300) return null;
+
       return {
         severity: ctx.m.tbt > 800 ? "high" : "medium",
         title: `${ctx.m.tbt}ms of main thread blocking`,
@@ -341,9 +400,11 @@ const SOURCE_RULES: SourceRule[] = [
   {
     id: "src-fetchpriority-low",
     run(index) {
-      const hits = index.searchRegex(/fetchPriority=["']low["']/g, { limit: 3 });
+      const hits = index.searchRegex(/fetchPriority=["']low["']/gi, { limit: 3 });
+
       if (!hits.length) return null;
       const first = hits[0]!;
+
       return {
         severity: "medium",
         title: 'A component hardcodes fetchPriority="low"',
@@ -361,8 +422,10 @@ const SOURCE_RULES: SourceRule[] = [
         /sizes=\{[^}]*(useMobile|isMobile|useMediaQuery|useWindow|window\.)/g,
         { limit: 3 },
       );
+
       if (!hits.length) return null;
       const first = hits[0]!;
+
       return {
         severity: "high",
         title: "An image sizes attribute is computed from JavaScript",
@@ -391,6 +454,7 @@ function parseCacheControl(value: string | null): CachePolicy {
   if (!value) return { maxAge: null, immutable: false, noStore: false };
   const v = value.toLowerCase();
   const maxAge = v.match(/(?:^|[,\s])max-age=(\d+)/) ?? v.match(/(?:^|[,\s])s-maxage=(\d+)/);
+
   return {
     maxAge: maxAge ? Number(maxAge[1]) : null,
     immutable: /\bimmutable\b/.test(v),
@@ -401,30 +465,38 @@ function parseCacheControl(value: string | null): CachePolicy {
 // A day is the line between "worth re-fetching" and "should have stuck around".
 function weaklyCached(policy: CachePolicy): boolean {
   if (policy.immutable) return false;
+
   if (policy.noStore) return true;
+
   if (policy.maxAge == null) return true;
+
   return policy.maxAge < 86400;
 }
 
 function assetCacheRule(assets: NetworkAsset[], origin: string): Finding | null {
   const weak = assets.filter((a) => {
     if (!isStaticAsset(a.url)) return false;
+
     try {
       if (new URL(a.url).origin !== origin) return false;
     } catch {
       return false;
     }
+
     return weaklyCached(parseCacheControl(a.cacheControl));
   });
+
   if (!weak.length) return null;
 
   const bytes = weak.reduce((n, a) => n + a.bytes, 0);
+
   const examples = weak
     .slice()
     .sort((a, b) => b.bytes - a.bytes)
     .slice(0, 4)
     .map((a) => {
       const cc = a.cacheControl ? `\`${a.cacheControl}\`` : "no cache-control header";
+
       return a.bytes ? `${shortName(a.url)} (${kb(a.bytes)}, ${cc})` : `${shortName(a.url)} (${cc})`;
     })
     .join("; ");
@@ -443,43 +515,71 @@ function assetCacheRule(assets: NetworkAsset[], origin: string): Finding | null 
 const ORDER: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
 const bySeverity = (a: Finding, b: Finding) => ORDER[a.severity] - ORDER[b.severity];
 
-export function runRules(ctx: RuleContext): Finding[] {
-  if (ctx.m.error) return [];
-  const findings: Finding[] = [];
-  for (const rule of RULES) {
-    let f: Omit<Finding, "rule" | "route"> | null;
-    try {
-      f = rule.run(ctx);
-    } catch {
-      f = null;
-    }
-    if (!f) continue;
-    const located =
-      f.file || !ctx.attribution
-        ? {}
-        : { file: ctx.attribution.file, line: ctx.attribution.line, foundBy: ctx.attribution.how };
-    findings.push({ ...f, ...located, rule: rule.id, route: ctx.route });
-  }
-  return findings.sort(bySeverity);
+// Only rules about the LCP element can say where it lives in the source.
+const ELEMENT_RULE = /^(lcp-image-|lcp-not-in-ssr-html$|lcp-render-delay-dominant$)/;
+
+export interface RuleRun {
+  findings: Finding[];
+  failures: string[];
 }
 
-export function runSourceRules(index: SourceIndex): Finding[] {
+function failureNote(id: string, reason: string): string {
+  return `rule ${id} failed: ${reason}`;
+}
+
+export function runRules(ctx: RuleContext): RuleRun {
+  if (ctx.m.error) return { findings: [], failures: [] };
   const findings: Finding[] = [];
-  for (const rule of SOURCE_RULES) {
-    let f: Omit<Finding, "rule"> | null;
+  const failures: string[] = [];
+
+  for (const rule of RULES) {
+    let f: Omit<Finding, "rule" | "route"> | null;
+
     try {
-      f = rule.run(index);
-    } catch {
+      f = rule.run(ctx);
+    } catch (err) {
+      failures.push(failureNote(rule.id, err instanceof Error ? err.message : String(err)));
       f = null;
     }
+
+    if (!f) continue;
+
+    const located =
+      f.file || !ctx.attribution || !ELEMENT_RULE.test(rule.id)
+        ? {}
+        : { file: ctx.attribution.file, line: ctx.attribution.line, foundBy: ctx.attribution.how };
+
+    findings.push({ ...f, ...located, rule: rule.id, route: ctx.route });
+  }
+
+  return { findings: findings.sort(bySeverity), failures };
+}
+
+export function runSourceRules(index: SourceIndex): RuleRun {
+  const findings: Finding[] = [];
+  const failures: string[] = [];
+
+  for (const rule of SOURCE_RULES) {
+    let f: Omit<Finding, "rule"> | null;
+
+    try {
+      f = rule.run(index);
+    } catch (err) {
+      failures.push(failureNote(rule.id, err instanceof Error ? err.message : String(err)));
+      f = null;
+    }
+
     if (f) findings.push({ ...f, rule: rule.id });
   }
-  return findings.sort(bySeverity);
+
+  return { findings: findings.sort(bySeverity), failures };
 }
 
 export function runNetworkRules(assets: NetworkAsset[], origin: string): Finding[] {
   const findings: Finding[] = [];
   const cache = assetCacheRule(assets, origin);
+
   if (cache) findings.push(cache);
+
   return findings.sort(bySeverity);
 }

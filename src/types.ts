@@ -55,10 +55,11 @@ export interface ProbeResult {
   ttfb: number;
   cls: number | null;
   worstShift: ShiftInfo | null;
-  tbt: number;
+  tbt: number | null;
   longTaskCount: number;
   resources: ResourceInfo[];
   preloads: PreloadInfo[];
+  observerErrors: string[];
 }
 
 export interface Phases {
@@ -100,6 +101,7 @@ export interface Measurement extends ProbeResult {
   thirdPartyBytes: Record<string, number>;
   cacheByUrl: Record<string, string | null>;
   html: string;
+  warnings: string[];
 }
 
 export interface NetworkAsset {
@@ -182,6 +184,7 @@ export interface RouteResult {
   error: string | null;
   attribution: { file: string; line: number; how: string } | null;
   findings: Finding[];
+  warnings: string[];
 }
 
 export interface ReportMeta {

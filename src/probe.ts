@@ -11,6 +11,7 @@ export function probe(settleMs: number): Promise<ProbeResult> {
       const img = el instanceof HTMLImageElement ? el : null;
       const chain: string[] = [];
       let node: Element | null = el;
+
       for (let i = 0; node && i < 5; i++) {
         const cls = node.getAttribute("class");
         chain.push(
@@ -20,6 +21,7 @@ export function probe(settleMs: number): Promise<ProbeResult> {
         );
         node = node.parentElement;
       }
+
       return {
         tag: el.tagName.toLowerCase(),
         id: el.id || null,
@@ -42,6 +44,8 @@ export function probe(settleMs: number): Promise<ProbeResult> {
 
     const onLcp = (entry: PerformanceEntry) => {
       lastLcpAt = performance.now();
+
+      // SAFETY: entries from the largest-contentful-paint observer are LargestContentfulPaint, which lib.dom omits.
       const e = entry as PerformanceEntry & {
         renderTime: number;
         loadTime: number;
@@ -49,6 +53,7 @@ export function probe(settleMs: number): Promise<ProbeResult> {
         url?: string;
         element?: Element | null;
       };
+
       lcp = {
         time: Math.round(e.renderTime || e.loadTime || e.startTime),
         size: Math.round(e.size),
@@ -58,11 +63,13 @@ export function probe(settleMs: number): Promise<ProbeResult> {
     };
 
     const onShift = (entry: PerformanceEntry) => {
+      // SAFETY: entries from the layout-shift observer are LayoutShift, which lib.dom omits.
       const e = entry as PerformanceEntry & {
         value: number;
         hadRecentInput: boolean;
         sources?: { node?: Element | null }[];
       };
+
       if (e.hadRecentInput) return;
       lastShiftAt = performance.now();
       shifts.push({
@@ -81,17 +88,22 @@ export function probe(settleMs: number): Promise<ProbeResult> {
     };
 
     const observers: { po: PerformanceObserver; cb: (e: PerformanceEntry) => void }[] = [];
+    const failed = new Map<string, string>();
+
     const observe = (type: string, cb: (e: PerformanceEntry) => void) => {
       try {
-        const po = new PerformanceObserver((list) => list.getEntries().forEach(cb));
-        po.observe({ type, buffered: true } as PerformanceObserverInit);
-        observers.push({ po, cb });
-      } catch {}
-    };
+        const po = new PerformanceObserver((list) => {
+          list.getEntries().forEach(cb);
 
-    observe("largest-contentful-paint", onLcp);
-    observe("layout-shift", onShift);
-    observe("longtask", onLongTask);
+          if (type !== "longtask") reschedule();
+        });
+
+        po.observe({ type, buffered: true });
+        observers.push({ po, cb });
+      } catch (err) {
+        failed.set(type, err instanceof Error ? err.message : String(err));
+      }
+    };
 
     const sessionCls = (): number | null => {
       if (!shifts.length) return 0;
@@ -100,32 +112,47 @@ export function probe(settleMs: number): Promise<ProbeResult> {
       let sum = 0;
       let windowStart = -Infinity;
       let last = -Infinity;
+
       for (const s of sorted) {
         if (s.time - last > 1000 || s.time - windowStart > 5000) {
           sum = 0;
           windowStart = s.time;
         }
+
         sum += s.value;
         last = s.time;
+
         if (sum > max) max = sum;
       }
+
       return Number(max.toFixed(4));
     };
 
     let collected = false;
+    let loadedAt: number | null = null;
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
+    let hardTimer: ReturnType<typeof setTimeout> | undefined;
+
     const collect = () => {
       if (collected) return;
       collected = true;
+      clearTimeout(settleTimer);
+      clearTimeout(hardTimer);
+
       for (const { po, cb } of observers) {
         po.takeRecords().forEach(cb);
         po.disconnect();
       }
 
+      // SAFETY: the "navigation" entry type only yields PerformanceNavigationTiming.
       const nav = performance.getEntriesByType("navigation")[0] as
         | PerformanceNavigationTiming
         | undefined;
+
       const resources = performance.getEntriesByType("resource").map((entry) => {
+        // SAFETY: the "resource" entry type only yields PerformanceResourceTiming; renderBlockingStatus is missing from lib.dom.
         const r = entry as PerformanceResourceTiming & { renderBlockingStatus?: string };
+
         return {
           name: r.name,
           type: r.initiatorType,
@@ -138,42 +165,51 @@ export function probe(settleMs: number): Promise<ProbeResult> {
         };
       });
 
-      const preloads = Array.from(document.querySelectorAll('link[rel="preload"]')).map((l) => ({
+      const preloads = Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel="preload"]')).map((l) => ({
         rel: l.getAttribute("rel") || "",
-        href: (l as HTMLLinkElement).href || "",
+        href: l.href || "",
         imagesrcset: l.getAttribute("imagesrcset"),
       }));
 
       const worstShift = shifts.slice().sort((a, b) => b.value - a.value)[0] || null;
-      const tbt = longTasks.reduce((a, t) => a + Math.max(0, t.duration - 50), 0);
+
+      const tbt = failed.has("longtask")
+        ? null
+        : longTasks.reduce((a, t) => a + Math.max(0, t.duration - 50), 0);
 
       resolve({
         lcp,
         ttfb: Math.round(nav?.responseStart || 0),
-        cls: sessionCls(),
+        cls: failed.has("layout-shift") ? null : sessionCls(),
         worstShift,
         tbt,
         longTaskCount: longTasks.length,
         resources,
         preloads,
+        observerErrors: [...failed].map(([type, msg]) => `${type}: ${msg}`),
       });
     };
 
+    // Settled once past 2.5s with no LCP update for 2s and no shift for 1.5s, or at settleMs.
+    function reschedule(): void {
+      if (loadedAt == null || collected) return;
+      const stableAt = Math.max(loadedAt + 2500, lastLcpAt + 2000, lastShiftAt + 1500);
+      const deadline = Math.min(loadedAt + settleMs, stableAt);
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(collect, Math.max(0, deadline - performance.now()));
+    }
+
     const settle = () => {
-      const loadedAt = performance.now();
-      const iv = setInterval(() => {
-        const now = performance.now();
-        const sinceLoad = now - loadedAt;
-        const stable = now - lastLcpAt >= 2000 && now - lastShiftAt >= 1500;
-        if (sinceLoad >= settleMs || (sinceLoad >= 2500 && stable)) {
-          clearInterval(iv);
-          collect();
-        }
-      }, 250);
+      loadedAt = performance.now();
+      reschedule();
     };
+
+    observe("largest-contentful-paint", onLcp);
+    observe("layout-shift", onShift);
+    observe("longtask", onLongTask);
 
     if (document.readyState === "complete") settle();
     else addEventListener("load", settle);
-    setTimeout(collect, 45000);
+    hardTimer = setTimeout(collect, 45000);
   });
 }

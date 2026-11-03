@@ -9,7 +9,7 @@ import type {
   ResourceInfo,
 } from "./types.js";
 
-export const PROFILES: Record<string, Profile> = {
+export const PROFILES = {
   mobile: {
     label: "Slow 4G, 4x CPU, 412x915",
     cpu: 4,
@@ -34,31 +34,41 @@ export const PROFILES: Record<string, Profile> = {
     isMobile: false,
     userAgent: null,
   },
-};
+} satisfies Record<string, Profile>;
+
+export function profileByName(name: string): Profile | undefined {
+  return Object.entries(PROFILES).find(([key]) => key === name)?.[1];
+}
 
 function computePhases(raw: ProbeResult, lcpResource: ResourceInfo | null): Phases | null {
   if (!raw.lcp) return null;
   const ttfb = raw.ttfb || 0;
   const total = raw.lcp.time;
+
   if (!lcpResource) {
     return { ttfb, loadDelay: 0, loadTime: 0, renderDelay: Math.max(0, total - ttfb), total, kind: "text" };
   }
+
   const loadDelay = Math.max(0, lcpResource.requestStart - ttfb);
   const loadTime = Math.max(0, lcpResource.responseEnd - lcpResource.requestStart);
   const renderDelay = Math.max(0, total - lcpResource.responseEnd);
+
   return { ttfb, loadDelay, loadTime, renderDelay, total, kind: "image" };
 }
 
 export function dominantPhase(p: Phases | null): DominantPhase | null {
   if (!p) return null;
+
   const parts: [DominantPhase["name"], number][] = [
     ["ttfb", p.ttfb],
     ["loadDelay", p.loadDelay],
     ["loadTime", p.loadTime],
     ["renderDelay", p.renderDelay],
   ];
+
   parts.sort((a, b) => b[1] - a[1]);
   const [name, value] = parts[0]!;
+
   return { name, value, share: p.total ? value / p.total : 0 };
 }
 
@@ -70,14 +80,18 @@ function aggregate(raw: ProbeResult, cdpSizes: Map<string, number>, origin: stri
 
   for (const r of raw.resources) {
     const size = cdpSizes.get(r.name) ?? r.transferSize ?? r.encodedSize;
+
     if (lcpTime == null || r.responseEnd > lcpTime) continue;
     bytesBeforeLcp += size;
     bytesByType[r.type] = (bytesByType[r.type] || 0) + size;
+
     try {
       const host = new URL(r.name).origin;
+
       if (host !== origin) thirdPartyBytes[host] = (thirdPartyBytes[host] || 0) + size;
     } catch {}
   }
+
   return { bytesBeforeLcp, bytesByType, thirdPartyBytes };
 }
 
@@ -85,19 +99,24 @@ function headerValue(headers: Record<string, string>, name: string): string | nu
   for (const key of Object.keys(headers)) {
     if (key.toLowerCase() === name) return headers[key] ?? null;
   }
+
   return null;
 }
 
-async function fetchHtml(url: string, userAgent: string | null): Promise<string> {
+async function fetchHtml(
+  url: string,
+  userAgent: string | null,
+): Promise<{ html: string; error: string | null }> {
   try {
     const res = await fetch(url, {
       headers: userAgent ? { "user-agent": userAgent } : {},
       redirect: "follow",
       signal: AbortSignal.timeout(15000),
     });
-    return await res.text();
-  } catch {
-    return "";
+
+    return { html: await res.text(), error: null };
+  } catch (err) {
+    return { html: "", error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -121,6 +140,7 @@ async function measureOnce(
     hasTouch: profile.isMobile,
     userAgent: profile.userAgent ?? undefined,
   });
+
   const page = await context.newPage();
   const client = await context.newCDPSession(page);
 
@@ -131,6 +151,7 @@ async function measureOnce(
     "Network.responseReceived",
     (e: { requestId: string; response: { url: string; headers: Record<string, string> } }) => {
       urlByRequest.set(e.requestId, e.response.url);
+
       if (!(e.response.url in cacheByUrl)) {
         cacheByUrl[e.response.url] = headerValue(e.response.headers, "cache-control");
       }
@@ -138,6 +159,7 @@ async function measureOnce(
   );
   client.on("Network.loadingFinished", (e: { requestId: string; encodedDataLength: number }) => {
     const u = urlByRequest.get(e.requestId);
+
     if (u) cdpSizes.set(u, (cdpSizes.get(u) || 0) + e.encodedDataLength);
   });
 
@@ -150,10 +172,12 @@ async function measureOnce(
     longTaskCount: 0,
     resources: [],
     preloads: [],
+    observerErrors: [],
   };
 
   try {
     await client.send("Network.enable");
+
     if (profile.network) await client.send("Network.emulateNetworkConditions", profile.network);
     await client.send("Emulation.setCPUThrottlingRate", { rate: profile.cpu });
     await client.send("Network.setCacheDisabled", { cacheDisabled: true });
@@ -161,10 +185,12 @@ async function measureOnce(
     await page.goto(url, { waitUntil: "commit", timeout });
 
     let raw: ProbeResult;
+
     try {
       raw = await page.evaluate(probe, settleMs);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+
       if (!/context was destroyed|navigation/i.test(msg)) throw err;
       await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
       raw = await page.evaluate(probe, settleMs);
@@ -172,9 +198,11 @@ async function measureOnce(
 
     const origin = new URL(url).origin;
     const found = raw.lcp?.url ? raw.resources.find((r) => r.name === raw.lcp!.url) ?? null : null;
+
     const lcpResource = found
       ? { ...found, transferSize: cdpSizes.get(found.name) ?? found.transferSize }
       : null;
+
     return {
       ...raw,
       ...aggregate(raw, cdpSizes, origin),
@@ -183,9 +211,11 @@ async function measureOnce(
       cacheByUrl,
       error: null,
       html: "",
+      warnings: raw.observerErrors.map((e) => `Observer failed (${e}). Metrics it feeds were not measured.`),
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message.split("\n")[0]! : String(err);
+
     return {
       ...empty,
       error: msg,
@@ -196,6 +226,7 @@ async function measureOnce(
       thirdPartyBytes: {},
       cacheByUrl: {},
       html: "",
+      warnings: [],
     };
   } finally {
     await context.close().catch(() => {});
@@ -208,18 +239,32 @@ export async function measure(
   profile: Profile,
   opts: MeasureOpts = {},
 ): Promise<Measurement> {
-  const runs = Math.max(1, opts.runs ?? 1);
+  const runs = opts.runs ?? 1;
+
+  if (!Number.isInteger(runs) || runs < 1) {
+    throw new Error(`runs must be a whole number of 1 or more, got "${String(opts.runs)}".`);
+  }
+
   const samples: Measurement[] = [];
+
   for (let i = 0; i < runs; i++) {
     opts.onRun?.(i + 1, runs);
     samples.push(await measureOnce(browser, url, profile, opts));
   }
+
   const ok = samples.filter((s) => s.lcp);
+
   if (!ok.length) return samples[0]!;
 
   ok.sort((a, b) => a.lcp!.time - b.lcp!.time);
   const median = ok[Math.floor(ok.length / 2)]!;
-  median.html = await fetchHtml(url, profile.userAgent);
+  const page = await fetchHtml(url, profile.userAgent);
+  median.html = page.html;
+
+  if (page.error) {
+    median.warnings.push(`Could not fetch the server HTML (${page.error}). Server-HTML checks were skipped.`);
+  }
+
   return median;
 }
 

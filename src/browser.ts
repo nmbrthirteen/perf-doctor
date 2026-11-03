@@ -24,19 +24,23 @@ const CANDIDATES: Partial<Record<NodeJS.Platform, string[]>> = {
 
 export function findBrowser(): string | null {
   if (process.env["PERF_DOCTOR_CHROME"]) return process.env["PERF_DOCTOR_CHROME"];
+
   for (const path of CANDIDATES[process.platform] ?? []) {
     if (existsSync(path)) return path;
   }
+
   return null;
 }
 
 export async function launch(): Promise<Browser> {
   const executablePath = findBrowser();
+
   if (!executablePath) {
     throw new Error(
       "No Chrome, Chromium, Edge, or Brave found. Install Chrome, or set PERF_DOCTOR_CHROME to a browser binary.",
     );
   }
+
   return chromium.launch({
     executablePath,
     args: ["--disable-features=Translate,AcceptCHFrame", "--no-first-run"],
